@@ -16,61 +16,33 @@ class HARCapture:
     
     def _update_har(self):
         entries = []
-        
         for flow in self.flows:
-            request = flow.request
-            response = flow.response
+            req = flow.request
+            res = flow.response
             
             entry = {
-                "startedDateTime": datetime.fromtimestamp(
-                    request.timestamp_start
-                ).isoformat(),
-                "time": (
-                    (response.timestamp_end - request.timestamp_start) * 1000
-                    if response and response.timestamp_end
-                    else 0
-                ),
+                "startedDateTime": datetime.fromtimestamp(req.timestamp_start).isoformat(),
+                "time": ((res.timestamp_end - req.timestamp_start) * 1000) if (res and res.timestamp_end) else 0,
                 "request": {
-                    "method": request.method,
-                    "url": request.pretty_url,
-                    "httpVersion": request.http_version,
-                    "headers": [
-                        {"name": name, "value": value}
-                        for name, value in request.headers.items()
-                    ],
-                    "queryString": [
-                        {"name": name, "value": value}
-                        for name, value in request.query.items(multi=True)
-                    ],
-                    "postData": (
-                        {
-                            "mimeType": request.headers.get("content-type", ""),
-                            "text": request.get_text(strict=False)
-                        }
-                        if request.content
-                        else None
-                    )
+                    "method": req.method,
+                    "url": req.pretty_url,
+                    "httpVersion": req.http_version,
+                    "headers": [{"name": n, "value": v} for n, v in req.headers.items()],
+                    "queryString": [{"name": n, "value": v} for n, v in req.query.items(multi=True)],
+                    "postData": {"mimeType": req.headers.get("content-type", ""), "text": req.get_text(strict=False)} if req.content else None
                 },
-                "response": (
-                    {
-                        "status": response.status_code,
-                        "statusText": response.reason,
-                        "httpVersion": response.http_version,
-                        "headers": [
-                            {"name": name, "value": value}
-                            for name, value in response.headers.items()
-                        ],
-                        "content": {
-                            "size": len(response.content or b""),
-                            "mimeType": response.headers.get("content-type", ""),
-                            "text": response.get_text(strict=False)
-                        }
+                "response": {
+                    "status": res.status_code,
+                    "statusText": res.reason,
+                    "httpVersion": res.http_version,
+                    "headers": [{"name": n, "value": v} for n, v in res.headers.items()],
+                    "content": {
+                        "size": len(res.content or b""),
+                        "mimeType": res.headers.get("content-type", ""),
+                        "text": res.get_text(strict=False)
                     }
-                    if response
-                    else {}
-                )
+                } if res else {}
             }
-            
             entries.append(entry)
         
         har = {
@@ -81,158 +53,103 @@ class HARCapture:
             }
         }
         
-        with open(self.har_file, "w", encoding="utf-8") as f:
+        with open(self.har_file, "w") as f:
             json.dump(har, f, indent=2, ensure_ascii=False)
-        
-        print(f"[HAR] Updated: {len(entries)} flows captured")
-    
-    def done(self):
-        pass
+        print(f"[HAR] Updated: {len(entries)} flows")
 
 class GPTInterceptor:
     def __init__(self):
         self.log_file = "gpt_conversations.log"
-        self.conversation_file = "conversations.txt"
-        self.gpt_endpoints = [
-            "chatgpt.com/backend-api/f/conversation"
-        ]
+        self.conv_file = "conversations.txt"
+        self.endpoints = ["chatgpt.com/backend-api/f/conversation"]
     
-    def is_request(self, url):
-        return any(endpoint in url for endpoint in self.gpt_endpoints)
+    def is_gpt_request(self, url):
+        return any(ep in url for ep in self.endpoints)
 
     def request(self, flow: http.HTTPFlow):
         url = flow.request.pretty_url
-
-        if not self.is_request(url):
+        if not self.is_gpt_request(url):
             return
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
         try:
             body = flow.request.content.decode("utf-8", errors="replace")
-            parsed = json.loads(body)
+            data = json.loads(body)
 
-            for message in parsed.get("messages", []):
-                if message.get("author", {}).get("role") != "user":
+            for msg in data.get("messages", []):
+                if msg.get("author", {}).get("role") != "user":
                     continue
 
-                parts = message.get("content", {}).get("parts", [])
-
-                prompt = "".join(
-                    part for part in parts
-                    if isinstance(part, str)
-                )
+                parts = msg.get("content", {}).get("parts", [])
+                prompt = "".join(p for p in parts if isinstance(p, str))
 
                 if prompt:
-                    with open(self.conversation_file, "a", encoding="utf-8") as f:
-                        f.write(f"[{timestamp}] Prompt: {prompt}\n")
-
-                    print(f"[{timestamp}] Prompt: {prompt}")
+                    with open(self.conv_file, "a") as f:
+                        f.write(f"[{ts}] Prompt: {prompt}\n")
+                    print(f"[{ts}] Prompt: {prompt}")
 
         except json.JSONDecodeError as e:
-            print(f"[ERROR] Failed to parse request JSON: {e}")
+            print(f"[ERROR] {e}")
 
-    
     def response(self, flow: http.HTTPFlow):
         url = flow.request.pretty_url
-
-        if not self.is_request(url):
+        if not self.is_gpt_request(url):
             return
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         status = flow.response.status_code
-
         body = flow.response.content.decode("utf-8", errors="replace")
 
-        assistant_response = ""
-        matches = []
-
-        current_event = None
-        collecting_text = False
+        resp_text = ""
+        entries = []
+        event = None
+        reading_text = False
 
         for line in body.splitlines():
-
             line = line.strip()
 
             if line.startswith("event:"):
-                current_event = line[6:].strip()
+                event = line[6:].strip()
                 continue
 
             if not line.startswith("data:"):
                 continue
 
             data_str = line[5:].strip()
-
             if data_str == "[DONE]":
                 continue
 
             try:
-                parsed = json.loads(data_str)
+                obj = json.loads(data_str)
             except json.JSONDecodeError:
-                print(f"[ERROR] Failed to parse: {data_str[:200]}")
                 continue
 
-            matches.append(parsed)
+            entries.append(obj)
 
-            if not isinstance(parsed, dict):
+            if event != "delta":
                 continue
 
-            # We only care about delta events
-            if current_event != "delta":
-                continue
+            if obj.get("p") == "/message/content/parts/0" and obj.get("o") == "append":
+                reading_text = True
 
-            if (
-                parsed.get("p") == "/message/content/parts/0"
-                and parsed.get("o") == "append"
-            ):
-                collecting_text = True
+            if reading_text and "v" in obj:
+                resp_text += str(obj["v"])
 
-            if collecting_text:
-                value = parsed.get("v")
+            if obj.get("o") == "patch":
+                reading_text = False
 
-                if isinstance(value, str):
-                    assistant_response += value
-
-            if parsed.get("o") == "patch":
-                collecting_text = False
-
-        with open(self.log_file, "a", encoding="utf-8") as f:
-
-            f.write(f"\n[{timestamp}] RESPONSE (Status: {status})\n")
+        with open(self.log_file, "a") as f:
+            f.write(f"\n[{ts}] RESPONSE (Status: {status})\n")
+            f.write("=" * 80 + "\n\n")
+            for i, obj in enumerate(entries, 1):
+                f.write(f"--- Entry #{i} ---\n")
+                f.write(json.dumps(obj, indent=4, ensure_ascii=False) + "\n\n")
             f.write("=" * 80 + "\n\n")
 
-            for i, parsed in enumerate(matches, 1):
-
-                f.write(f"--- Data Entry #{i} ---\n")
-
-                f.write(
-                    json.dumps(
-                        parsed,
-                        indent=4,
-                        ensure_ascii=False
-                    )
-                )
-
-                f.write("\n\n")
-
-            f.write("=" * 80 + "\n\n")
-
-        if assistant_response:
-
-            with open(self.conversation_file, "a", encoding="utf-8") as f:
-
-                f.write(
-                    f"[{timestamp}] Assistant: {assistant_response}\n"
-                )
-
-            print(
-                f"[{timestamp}] Assistant: {assistant_response}"
-            )
-
-        else:
-
-            print(
-                f"[{timestamp}] No assistant response extracted"
-            )
+        if resp_text:
+            with open(self.conv_file, "a") as f:
+                f.write(f"[{ts}] Assistant: {resp_text}\n")
+            print(f"[{ts}] Assistant: {resp_text}")
 
 addons = [HARCapture(), GPTInterceptor()]
