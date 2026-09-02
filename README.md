@@ -306,7 +306,7 @@ Captures only requests to api.github.com.
 
 ## References
 
-- [HTTP Archive (HAR) Spec](http://www.softwareishard.com/blog/har-1-2-spec/)
+- [HTTP Archive (HAR) Spec](http://www.softwareishard.com/blog/har-12-spec/)
 - [mitmproxy Documentation](https://docs.mitmproxy.org/)
 - [mitmproxy Addons](https://docs.mitmproxy.org/stable/addons-overview/)
 
